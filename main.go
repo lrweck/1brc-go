@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 )
 
 const (
@@ -48,7 +47,7 @@ func main() {
 	avgSizePerConsumer := fi.Size() / CONSUMERS
 	consumerPreallocSize := avgSizePerConsumer / AVG_ROW_SIZE
 
-	consumerQueue := make(chan []byte)
+	consumerQueue := make(chan []byte, 1000)
 	resultsQueue := make(chan []map[string]*Measurament, 1000)
 
 	wgConsumers := &sync.WaitGroup{}
@@ -184,8 +183,6 @@ func BytesSplit(s []byte, sep byte) [][]byte {
 
 	result := make([][]byte, 0, (len(s)/AVG_ROW_SIZE)+50)
 
-	
-
 	start := 0
 	for i, b := range s {
 		if b == sep {
@@ -205,10 +202,6 @@ func parseChunk(chunk []byte) map[string]*Measurament {
 
 	for _, m := range measurementsByLine {
 
-		// fmt.Printf("Chunk: %s\n", string(m))
-
-		//sv := bytes.Split(m, stationSep)
-
 		var bname []byte
 		var bvalue []byte
 
@@ -220,8 +213,9 @@ func parseChunk(chunk []byte) map[string]*Measurament {
 			}
 		}
 
-		if len(bname) == 0 || len(bvalue) == 0 {
-			panic("station name or value")
+		// remove crap from start of name
+		for bname[0] < 65 {
+			bname = bname[1:]
 		}
 
 		name := string(bname)
@@ -325,9 +319,7 @@ func processResults(output chan []map[string]*Measurament) string {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(`"`)
 		sb.WriteString(res)
-		sb.WriteString(`"`)
 	}
 
 	sb.WriteString("}")
