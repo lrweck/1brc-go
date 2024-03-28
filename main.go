@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"hash"
+	"hash/fnv"
 	"io"
 	"os"
 	"runtime/pprof"
@@ -12,13 +14,13 @@ import (
 )
 
 const (
-	BUFF_SIZE    = 4096
-	CONSUMERS    = 10
+	BUFF_SIZE    = 1 << 22
+	CONSUMERS    = 5
 	AVG_ROW_SIZE = 16
 )
 
 var (
-	lineSep = []byte("\r\n")
+	lineSep = []byte("\r")
 )
 
 func main() {
@@ -36,7 +38,7 @@ func main() {
 
 	start := time.Now()
 
-	f, err := os.Open("../1brc/measurements_50m.txt")
+	f, err := os.Open("../1brc/measurements_100m.txt")
 	if err != nil {
 		panic(err)
 	}
@@ -48,7 +50,7 @@ func main() {
 	consumerPreallocSize := avgSizePerConsumer / AVG_ROW_SIZE
 
 	consumerQueue := make(chan []byte, 1000)
-	resultsQueue := make(chan []map[string]*Measurament, 1000)
+	resultsQueue := make(chan []map[uint64]*Measurament, 1000)
 
 	wgConsumers := &sync.WaitGroup{}
 	wgConsumers.Add(CONSUMERS)
@@ -94,10 +96,10 @@ func main() {
 }
 
 func processBuffer(buff, remaining []byte, ch chan []byte) []byte {
-	b, a := CutLast(buff, lineSep)
-	before, after := make([]byte, len(b)), make([]byte, len(a))
-	copy(before, b)
-	copy(after, a)
+	before, after := CutLast(buff, lineSep)
+	// before, after := make([]byte, len(b)), make([]byte, len(a))
+	// copy(before, b)
+	// copy(after, a)
 
 	if len(remaining) > 0 {
 		// prepend last remains to the new chunk
@@ -128,7 +130,6 @@ func CutLast(s []byte, sep []byte) (before []byte, after []byte) {
 	}
 
 	if i == len(s)-1 {
-		// fmt.Printf("CUT found at last index %d = '%s'\n", i, string(s[i]))
 		return s[:i-len(sep)], nil
 	}
 
@@ -146,6 +147,7 @@ func LastIndex(s []byte, sep []byte) int {
 }
 
 type Measurament struct {
+	Name  []byte
 	Min   int
 	Max   int
 	Sum   int
@@ -159,26 +161,22 @@ type Measurament struct {
 func consumer1(
 	allocSize int64,
 	input chan []byte,
-	output chan []map[string]*Measurament,
+	output chan []map[uint64]*Measurament,
 ) {
 
-	results := make([]map[string]*Measurament, 0, allocSize/BUFF_SIZE)
+	results := make([]map[uint64]*Measurament, 0, allocSize/BUFF_SIZE)
+
+	hh := fnv.New64a()
 
 	for v := range input {
-
-		// 		fmt.Printf(`
-		// Arrived at consumer: %s
-		// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-		// `, string(v))
-
-		results = append(results, parseChunk(v))
+		results = append(results, parseChunk(hh, v))
 	}
 
 	output <- results
 
 }
 
-// this functions splits s into chunks of sep
+// this functions splits s into chunks by sep
 func BytesSplit(s []byte, sep byte) [][]byte {
 
 	result := make([][]byte, 0, (len(s)/AVG_ROW_SIZE)+50)
@@ -190,41 +188,53 @@ func BytesSplit(s []byte, sep byte) [][]byte {
 			start = i + 1
 		}
 	}
-	result = append(result, s[start:])
-	return result
+
+	return append(result, s[start:])
 
 }
 
-func parseChunk(chunk []byte) map[string]*Measurament {
+func nameAndValueFromBytes(m []byte) ([]byte, int) {
+	var bname []byte
+	var bvalue []byte
+
+	for i, b := range m {
+		if b == 59 { // ;
+			bname = m[:i]
+			bvalue = m[i+1:]
+			break
+		}
+	}
+
+	// remove crap from start of name
+	for bname[0] < 65 {
+		bname = bname[1:]
+	}
+
+	value := parseFloatBytesAsInt(bvalue)
+
+	return bname, value
+
+}
+
+func parseChunk(hh hash.Hash64, chunk []byte) map[uint64]*Measurament {
 
 	measurementsByLine := BytesSplit(chunk, lineSep[0])
-	results := make(map[string]*Measurament, len(chunk)/AVG_ROW_SIZE)
+	results := make(map[uint64]*Measurament, len(chunk)/10)
 
 	for _, m := range measurementsByLine {
 
-		var bname []byte
-		var bvalue []byte
+		bname, value := nameAndValueFromBytes(m)
 
-		for i, b := range m {
-			if b == 59 {
-				bname = m[:i]
-				bvalue = m[i+1:]
-				break
-			}
-		}
+		hh.Reset()
 
-		// remove crap from start of name
-		for bname[0] < 65 {
-			bname = bname[1:]
-		}
+		hh.Write(bname)
 
-		name := string(bname)
+		hash := hh.Sum64()
 
-		value := parseFloatBytesAsInt(bvalue)
-
-		found, ok := results[name]
+		found, ok := results[hash]
 		if !ok {
-			results[name] = &Measurament{
+			results[hash] = &Measurament{
+				Name:  bname,
 				Min:   value,
 				Max:   value,
 				Sum:   value,
@@ -247,30 +257,32 @@ func parseChunk(chunk []byte) map[string]*Measurament {
 	return results
 }
 
-func parseFloatBytesAsInt(b []byte) int {
-	var result int
-	negative := false
+func parseFloatBytesAsInt(data []byte) int {
 
-	// ignore last char bc it is a new line -- \n
-	for _, b := range b[:len(b)-1] {
-		if b == 45 { // 45 = `-` signal
-			negative = true
-			continue
-		}
-		result = result*10 + int(b-48)
+	var temp int
+	negative := data[0] == '-'
+	if negative {
+		data = data[1:]
+	}
+
+	switch len(data) {
+	case 3: // 1.2
+		temp = int(data[0])*10 + int(data[2]) - '0'*(10+1)
+	case 4: // 12.3
+		_ = data[3]
+		temp = int(data[0])*100 + int(data[1])*10 + int(data[3]) - '0'*(100+10+1)
 	}
 
 	if negative {
-		return -result
+		return -temp
 	}
-
-	return result
+	return temp
 }
 
-func processResults(output chan []map[string]*Measurament) string {
+func processResults(output chan []map[uint64]*Measurament) string {
 
 	sb := strings.Builder{}
-	results := make(map[string]*Measurament, 500)
+	results := make(map[uint64]*Measurament, 500)
 
 	for sliceOfMap := range output {
 
@@ -285,7 +297,7 @@ func processResults(output chan []map[string]*Measurament) string {
 					continue
 				}
 
-				found.Count += v.Count
+				found.Count++
 				found.Sum += v.Sum
 
 				if v.Min < found.Min {
@@ -300,12 +312,10 @@ func processResults(output chan []map[string]*Measurament) string {
 		}
 	}
 
-	// fmt.Printf("results before: %v\n", results)
-
 	slice := make([]string, 0, len(results))
 
-	for k, v := range results {
-		slice = append(slice, stationResultString(k, v))
+	for _, v := range results {
+		slice = append(slice, stationResultString(string(v.Name), v))
 	}
 
 	slices.SortFunc(slice, func(a, b string) int {
@@ -325,10 +335,6 @@ func processResults(output chan []map[string]*Measurament) string {
 	sb.WriteString("}")
 
 	ress := sb.String()
-
-	// which := ress[2]
-
-	// fmt.Printf("napoli: %v - %c - %T - %#v - %+v\n", which, which, which, which, which)
 
 	return ress
 }
