@@ -13,17 +13,51 @@ import (
 	"time"
 )
 
+func main() {
+
+	cpuprof, err := os.Create("cpu_profile.prof")
+	if err != nil {
+		panic(err)
+	}
+	defer cpuprof.Close()
+
+	if err := pprof.StartCPUProfile(cpuprof); err != nil {
+		panic(err)
+	}
+	defer pprof.StopCPUProfile()
+
+	start := time.Now()
+
+	buffs := []int64{19, 20, 21, 22, 23}
+	cons := []int{4, 5, 6, 7, 8, 9, 10}
+
+	for _, b := range cons {
+
+		for _, c := range buffs {
+			start := time.Now()
+			buffSize := int64(1) << c
+			process(buffSize, b)
+			elapsed := time.Since(start)
+			fmt.Printf("Consumers: %d, Buffsize: 1<<%d, Time taken: %s\n", b, c, elapsed)
+		}
+
+	}
+
+	elapsed := time.Since(start)
+	fmt.Println("Time taken to read the file: ", elapsed)
+}
+
 const (
 	BUFF_SIZE    = 1 << 19
 	CONSUMERS    = 6
-	AVG_ROW_SIZE = 10
+	AVG_ROW_SIZE = 14
 )
 
 var (
 	lineSep = byte('\r')
 )
 
-func process(buffSize int64, consumers int) {
+func process(buffSize int64, consumers int) string {
 	f, err := os.Open("../1brc/measurements_100m.txt")
 	if err != nil {
 		panic(err)
@@ -75,42 +109,8 @@ func process(buffSize int64, consumers int) {
 	wgConsumers.Wait()
 	close(resultsQueue)
 
-	<-chanResult
+	return <-chanResult
 
-}
-
-func main() {
-
-	cpuprof, err := os.Create("cpu_profile.prof")
-	if err != nil {
-		panic(err)
-	}
-	defer cpuprof.Close()
-
-	if err := pprof.StartCPUProfile(cpuprof); err != nil {
-		panic(err)
-	}
-	defer pprof.StopCPUProfile()
-
-	start := time.Now()
-
-	buffs := []int64{19, 20, 21, 22, 23}
-	cons := []int{4, 5, 6, 7, 8, 9, 10}
-
-	for _, b := range cons {
-
-		for _, c := range buffs {
-			start := time.Now()
-			buffSize := int64(1) << c
-			process(buffSize, b)
-			elapsed := time.Since(start)
-			fmt.Printf("Consumers: %d, Buffsize: 1<<%d, Time taken: %s\n", b, c, elapsed)
-		}
-
-	}
-
-	elapsed := time.Since(start)
-	fmt.Println("Time taken to read the file: ", elapsed)
 }
 
 func processBuffer(buff, remaining []byte, ch chan []byte) []byte {
@@ -122,10 +122,11 @@ func processBuffer(buff, remaining []byte, ch chan []byte) []byte {
 	if len(remaining) > 0 {
 		// prepend last remains to the new chunk
 		before = append(remaining, before...)
-		remaining = remaining[:0]
+		remaining = nil
 	}
 
 	if len(after) > 0 {
+		remaining = make([]byte, len(after))
 		copy(remaining, after)
 	}
 
@@ -191,23 +192,15 @@ func consumer1(
 
 // this functions splits s into chunks by sep
 func BytesSplit(s []byte, sep byte) [][]byte {
-
-	// Define an initial capacity for the result slice
-	result := make([][]byte, 0, len(s)/(AVG_ROW_SIZE+5))
+	result := make([][]byte, 0, (len(s)/AVG_ROW_SIZE)+50)
 	start := 0
 	for i, b := range s {
 		if b == sep {
-			// Append the sub-slice from start to i (excluding i)
 			result = append(result, s[start:i])
 			start = i + 1
 		}
 	}
-	// Include the remaining portion of the input slice
-	if start < len(s) {
-		result = append(result, s[start:])
-	}
-	return result
-
+	return append(result, s[start:])
 }
 
 func nameAndValueFromBytes(m []byte) ([]byte, int) {
@@ -260,7 +253,7 @@ func parseChunk(hh hash.Hash64, chunk []byte) map[uint64]*Measurament {
 			continue
 		}
 
-		found.Count++
+		found.Count += found.Count
 		found.Sum += value
 
 		if value < found.Min {
