@@ -1,50 +1,116 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"hash"
 	"hash/fnv"
 	"io"
 	"os"
-	"runtime/pprof"
+	//	"runtime"
+	//"runtime/pprof"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
+const (
+	KiloByte = 1000
+	KibiByte = 1024
+	MegaByte = 1000 * KiloByte
+	MebiByte = 1024 * KibiByte
+	GigaByte = 1000 * MegaByte
+	GibiByte = 1024 * MebiByte
+)
+
+type RunResult struct {
+	elapsed    time.Duration
+	bufferSize int64
+	consumers  int
+}
+
 func main() {
 
-	cpuprof, err := os.Create("cpu_profile.prof")
-	if err != nil {
-		panic(err)
-	}
-	defer cpuprof.Close()
+	// cpuprof, err := os.Create("./profiles/cpu_profile.prof")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer cpuprof.Close()
 
-	if err := pprof.StartCPUProfile(cpuprof); err != nil {
-		panic(err)
-	}
-	defer pprof.StopCPUProfile()
+	// if err := pprof.StartCPUProfile(cpuprof); err != nil {
+	// 	panic(err)
+	// }
+	// defer pprof.StopCPUProfile()
 
 	start := time.Now()
 
-	buffs := []int64{19, 20, 21, 22, 23}
-	cons := []int{4, 5, 6, 7, 8, 9, 10}
+	buffs := []int64{8 * MebiByte}
+	consumers := []int{12}
+	runsPerConfig := 1
 
-	for _, b := range cons {
+	results := make(map[string]*RunResult, len(buffs)*len(consumers)*runsPerConfig)
 
-		for _, c := range buffs {
-			start := time.Now()
-			buffSize := int64(1) << c
-			process(buffSize, b)
-			elapsed := time.Since(start)
-			fmt.Printf("Consumers: %d, Buffsize: 1<<%d, Time taken: %s\n", b, c, elapsed)
+	filename := "../1brc/measurements_1b.txt"
+
+	//consumerLoop:
+	for _, cons := range consumers {
+		for _, buff := range buffs {
+			for i := 0; i < runsPerConfig; i++ {
+
+				start := time.Now()
+				restring := process(filename, buff, cons)
+				elapsed := time.Since(start)
+				fmt.Println(restring)
+				//break consumerLoop
+
+				fmt.Printf("Consumers: %d, Buffsize: %d, Time taken: %s\n", cons, buff, elapsed)
+
+				stringKey := fmt.Sprintf("Consumers:%d_Buffsize:%d", cons, buff)
+				res, ok := results[stringKey]
+				if !ok {
+					results[stringKey] = &RunResult{
+						elapsed:    elapsed,
+						bufferSize: buff,
+						consumers:  cons,
+					}
+					continue
+				}
+
+				res.elapsed += elapsed
+
+			}
 		}
-
 	}
 
 	elapsed := time.Since(start)
 	fmt.Println("Time taken to read the file: ", elapsed)
+
+	res := findFastestRun(results)
+	if res == nil {
+		fmt.Println("No results")
+		return
+
+	}
+
+	fmt.Printf("Fastest run: Consumers: %d, Buffsize: %d, Time taken: %s\n", res.consumers, res.bufferSize, res.elapsed/time.Duration(runsPerConfig))
+
+}
+
+func findFastestRun(results map[string]*RunResult) *RunResult {
+	var fastest *RunResult
+	for _, res := range results {
+		if fastest == nil {
+			fastest = res
+			continue
+		}
+
+		if res.elapsed < fastest.elapsed {
+			fastest = res
+		}
+	}
+
+	return fastest
 }
 
 const (
@@ -54,23 +120,18 @@ const (
 )
 
 var (
-	lineSep = byte('\r')
+	lineSep = []byte("\r\n")
 )
 
-func process(buffSize int64, consumers int) string {
-	f, err := os.Open("../1brc/measurements_100m.txt")
+func process(filename string, buffSize int64, consumers int) string {
+	f, err := os.Open(filename)
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
 
-	fi, _ := f.Stat()
-
-	avgSizePerConsumer := fi.Size() / int64(consumers)
-	consumerPreallocSize := avgSizePerConsumer / AVG_ROW_SIZE
-
-	consumerQueue := make(chan []byte, 1000)
-	resultsQueue := make(chan []map[uint64]*Measurament, 1000)
+	consumerQueue := make(chan []byte, 100)
+	resultsQueue := make(chan map[uint64]*Measurament, 10)
 
 	wgConsumers := &sync.WaitGroup{}
 	wgConsumers.Add(consumers)
@@ -78,11 +139,11 @@ func process(buffSize int64, consumers int) string {
 	for i := 0; i < consumers; i++ {
 		go func() {
 			defer wgConsumers.Done()
-			consumer1(consumerPreallocSize, consumerQueue, resultsQueue)
+			consumer2(consumerQueue, resultsQueue)
 		}()
 	}
 
-	chanResult := make(chan string)
+	chanResult := make(chan string, 1)
 	go func() {
 		chanResult <- processResults(resultsQueue)
 		close(chanResult)
@@ -114,10 +175,8 @@ func process(buffSize int64, consumers int) string {
 }
 
 func processBuffer(buff, remaining []byte, ch chan []byte) []byte {
-	before, after := CutLast(buff, lineSep)
-	// before, after := make([]byte, len(b)), make([]byte, len(a))
-	// copy(before, b)
-	// copy(after, a)
+
+	before, after, _ := bytes.Cut(buff, lineSep)
 
 	if len(remaining) > 0 {
 		// prepend last remains to the new chunk
@@ -136,30 +195,6 @@ func processBuffer(buff, remaining []byte, ch chan []byte) []byte {
 	return remaining
 }
 
-func CutLast(s []byte, sep byte) (before []byte, after []byte) {
-	i := LastIndex(s, sep)
-
-	if len(s) == 0 {
-		panic("Empty slice for cutlast")
-	}
-
-	if i == len(s)-1 {
-		return s[:i-1], nil
-	}
-
-	return s[:i-1], s[i+1:]
-
-}
-
-func LastIndex(s []byte, sep byte) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == sep {
-			return i
-		}
-	}
-	return -1
-}
-
 type Measurament struct {
 	Name  []byte
 	Min   int
@@ -168,159 +203,140 @@ type Measurament struct {
 	Count int
 }
 
-// func (m *Measurament) String() string {
-// 	return fmt.Sprintf("{Min: %d, Max: %d, Sum: %d, Count: %d}", m.Min, m.Max, m.Sum, m.Count)
-// }
+func (m *Measurament) String() string {
+	return fmt.Sprintf("{Min: %d, Max: %d, Sum: %d, Count: %d}", m.Min, m.Max, m.Sum, m.Count)
+}
 
-func consumer1(
-	allocSize int64,
+func consumer2(
 	input chan []byte,
-	output chan []map[uint64]*Measurament,
+	output chan map[uint64]*Measurament,
 ) {
-
-	results := make([]map[uint64]*Measurament, 0, allocSize/BUFF_SIZE)
 
 	hh := fnv.New64a()
 
 	for v := range input {
-		results = append(results, parseChunk(hh, v))
+		output <- parseChunk(hh, v)
 	}
-
-	output <- results
 
 }
 
-// this functions splits s into chunks by sep
-func BytesSplit(s []byte, sep byte) [][]byte {
-	result := make([][]byte, 0, (len(s)/AVG_ROW_SIZE)+50)
-	start := 0
-	for i, b := range s {
-		if b == sep {
-			result = append(result, s[start:i])
+func fnv32(key []byte) uint64 {
+	hash := uint64(2166136261)
+	const prime32 = uint64(16777619)
+	keyLength := len(key)
+	for i := 0; i < keyLength; i++ {
+		hash *= prime32
+		hash ^= uint64(key[i])
+	}
+	return hash
+}
+
+func NewMeasurament(name []byte, value int) *Measurament {
+	return &Measurament{
+		Name:  name,
+		Min:   value,
+		Max:   value,
+		Sum:   value,
+		Count: 1,
+	}
+
+}
+
+func parseChunk(_ hash.Hash64, chunk []byte) map[uint64]*Measurament {
+
+	results := make(map[uint64]*Measurament, 412)
+
+	var start int
+	var cityName []byte
+	var cityValue int
+
+	_ = chunk[len(chunk)-1] // avoid bounds check error
+
+	for i := 3; i < len(chunk); i++ {
+		b := chunk[i]
+		switch b {
+		case ';':
+			cityName = chunk[start:i]
 			start = i + 1
-		}
-	}
-	return append(result, s[start:])
-}
+			i += 3 // at least 3 digits for value
+		case '\n':
+			if i-start > 1 {
 
-func nameAndValueFromBytes(m []byte) ([]byte, int) {
-	var bname []byte
-	var bvalue []byte
+				cityValue = parseFloatBytesAsInt(chunk[start : i-1])
+				start = i + 1
+				i += 4 //advance at least 4 bytes, bc thats the smallest name
 
-	for i, b := range m {
-		if b == 59 { // ;
-			bname = m[:i]
-			bvalue = m[i+1:]
-			break
-		}
-	}
+				hashed := fnv32(cityName)
 
-	// remove crap from start of name
-	for bname[0] < 65 {
-		bname = bname[1:]
-	}
+				found, ok := results[hashed]
+				if !ok {
+					results[hashed] = NewMeasurament(cityName, cityValue)
+					continue
+				}
 
-	value := parseFloatBytesAsInt(bvalue)
+				found.Count++
+				found.Sum += cityValue
 
-	return bname, value
+				found.Min = min(found.Min, cityValue)
+				found.Max = max(found.Max, cityValue)
 
-}
-
-func parseChunk(hh hash.Hash64, chunk []byte) map[uint64]*Measurament {
-
-	measurementsByLine := BytesSplit(chunk, lineSep)
-	results := make(map[uint64]*Measurament, len(chunk)/10)
-
-	for _, m := range measurementsByLine {
-
-		bname, value := nameAndValueFromBytes(m)
-
-		hh.Reset()
-
-		hh.Write(bname)
-
-		hash := hh.Sum64()
-
-		found, ok := results[hash]
-		if !ok {
-			results[hash] = &Measurament{
-				Name:  bname,
-				Min:   value,
-				Max:   value,
-				Sum:   value,
-				Count: 1,
 			}
-			continue
-		}
-
-		found.Count += found.Count
-		found.Sum += value
-
-		if value < found.Min {
-			found.Min = value
-		}
-
-		if value > found.Max {
-			found.Max = value
 		}
 	}
+
 	return results
 }
 
 func parseFloatBytesAsInt(data []byte) int {
 
-	var temp int
 	negative := data[0] == '-'
 	if negative {
 		data = data[1:]
 	}
 
+	var result int
 	switch len(data) {
-	case 3: // 1.2
-		temp = int(data[0])*10 + int(data[2]) - '0'*(10+1)
-	case 4: // 12.3
-		_ = data[3]
-		temp = int(data[0])*100 + int(data[1])*10 + int(data[3]) - '0'*(100+10+1)
+	// 1.2
+	case 3:
+		result = int(data[0])*10 + int(data[2]) - '0'*(10+1)
+	// 12.3
+	case 4:
+		result = int(data[0])*100 + int(data[1])*10 + int(data[3]) - '0'*(100+10+1)
 	}
 
 	if negative {
-		return -temp
+		return -result
 	}
-	return temp
+	return result
 }
 
-func processResults(output chan []map[uint64]*Measurament) string {
+func processResults(output chan map[uint64]*Measurament) string {
 
-	sb := strings.Builder{}
-	results := make(map[uint64]*Measurament, 500)
+	results := make(map[uint64]*Measurament, 415)
 
 	for sliceOfMap := range output {
 
-		for _, mp := range sliceOfMap {
+		//fmt.Printf("received map of size %d\n", len(sliceOfMap))
 
-			for k, v := range mp {
+		for k, v := range sliceOfMap {
 
-				found, ok := results[k]
+			found, ok := results[k]
 
-				if !ok {
-					results[k] = v
-					continue
-				}
-
-				found.Count++
-				found.Sum += v.Sum
-
-				if v.Min < found.Min {
-					found.Min = v.Min
-
-				}
-
-				if v.Max > found.Max {
-					found.Max = v.Max
-				}
+			if !ok {
+				results[k] = v
+				continue
 			}
+
+			found.Count += v.Count
+			found.Sum += v.Sum
+
+			found.Min = min(found.Min, v.Min)
+			found.Max = max(found.Max, v.Max)
+
 		}
 	}
+
+	// fmt.Printf("Results: %v\n", results)
 
 	slice := make([]string, 0, len(results))
 
@@ -334,6 +350,10 @@ func processResults(output chan []map[uint64]*Measurament) string {
 		return strings.Compare(a, b)
 	})
 
+	sb := strings.Builder{}
+
+	sb.Grow(10660)
+
 	sb.WriteString("{")
 	for i, res := range slice {
 		if i > 0 {
@@ -345,6 +365,7 @@ func processResults(output chan []map[uint64]*Measurament) string {
 	sb.WriteString("}")
 
 	ress := sb.String()
+	println(len(ress))
 
 	return ress
 }
