@@ -3,12 +3,8 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"hash"
-	"hash/fnv"
-	"io"
 	"os"
-	//	"runtime"
-	//"runtime/pprof"
+	"runtime/pprof"
 	"slices"
 	"strings"
 	"sync"
@@ -32,16 +28,16 @@ type RunResult struct {
 
 func main() {
 
-	// cpuprof, err := os.Create("./profiles/cpu_profile.prof")
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// defer cpuprof.Close()
+	cpuprof, err := os.Create("./profiles/cpu_profile.prof")
+	if err != nil {
+		panic(err)
+	}
+	defer cpuprof.Close()
 
-	// if err := pprof.StartCPUProfile(cpuprof); err != nil {
-	// 	panic(err)
-	// }
-	// defer pprof.StopCPUProfile()
+	if err := pprof.StartCPUProfile(cpuprof); err != nil {
+		panic(err)
+	}
+	defer pprof.StopCPUProfile()
 
 	start := time.Now()
 
@@ -124,6 +120,7 @@ var (
 )
 
 func process(filename string, buffSize int64, consumers int) string {
+
 	f, err := os.Open(filename)
 	if err != nil {
 		panic(err)
@@ -152,18 +149,15 @@ func process(filename string, buffSize int64, consumers int) string {
 	buff := make([]byte, buffSize)
 	lastRemains := make([]byte, 100)
 
+	var n int
 	for {
-		n, err := f.Read(buff)
 
+		n, err = f.Read(buff)
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			panic(err)
+			break
 		}
 
 		lastRemains = processBuffer(buff[:n], lastRemains, consumerQueue)
-
 	}
 
 	close(consumerQueue)
@@ -212,10 +206,8 @@ func consumer2(
 	output chan map[uint64]*Measurament,
 ) {
 
-	hh := fnv.New64a()
-
 	for v := range input {
-		output <- parseChunk(hh, v)
+		output <- parseChunk(v)
 	}
 
 }
@@ -242,7 +234,7 @@ func NewMeasurament(name []byte, value int) *Measurament {
 
 }
 
-func parseChunk(_ hash.Hash64, chunk []byte) map[uint64]*Measurament {
+func parseChunk(chunk []byte) map[uint64]*Measurament {
 
 	results := make(map[uint64]*Measurament, 412)
 
@@ -315,8 +307,6 @@ func processResults(output chan map[uint64]*Measurament) string {
 	results := make(map[uint64]*Measurament, 415)
 
 	for sliceOfMap := range output {
-
-		//fmt.Printf("received map of size %d\n", len(sliceOfMap))
 
 		for k, v := range sliceOfMap {
 
